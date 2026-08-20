@@ -10,7 +10,7 @@ HTTPS endpoint. Use it when your organization runs on Teams and exposes
 ## Prerequisites
 
 - netclaw installed and initialized with [`netclaw init`](/cli/init/)
-- PowerShell 7 and a checkout of the netclaw release you run
+- Windows PowerShell 5.1 or PowerShell 7, plus a checkout of the netclaw release you run
 - An Azure subscription with permission to create an Azure Bot resource
 - Permission to upload custom Teams apps, or help from a Teams administrator
 - A public HTTPS URL with a valid certificate that reaches `/api/messages`
@@ -60,16 +60,20 @@ This package does not enable private or shared channels.
 The [package source](https://github.com/netclaw-dev/netclaw/tree/dev/deploy/teams)
 contains the manifest template, icons, and build script.
 
-Run this command from the repository root in PowerShell 7.
+Run this command from the repository root in PowerShell.
 
 ```powershell
-pwsh ./deploy/teams/build-package.ps1 `
-  -AppId '<entra-application-id>' `
-  -DeveloperName '<operator-name>' `
-  -PrivacyUrl 'https://example.com/privacy' `
-  -TermsOfUseUrl 'https://example.com/terms' `
-  -Version '1.0.0' `
-  -OutputPath './artifacts/netclaw-teams.zip'
+$BuildPackage = @{
+    AppId = '00000000-0000-0000-0000-000000000000'
+    DeveloperName = 'Example Operator'
+    PrivacyUrl = 'https://example.com/privacy'
+    TermsOfUseUrl = 'https://example.com/terms'
+    OutputPath = './artifacts/netclaw-teams.zip'
+    Version = '1.0.0'
+    Verbose = $true
+}
+
+./deploy/teams/build-package.ps1 @BuildPackage
 ```
 
 The ZIP contains `manifest.json`, `color.png`, and `outline.png` at its root.
