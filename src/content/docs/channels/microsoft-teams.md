@@ -1,94 +1,234 @@
 ---
 title: "Microsoft Teams"
-description: "Connect netclaw to personal chats and standard channels in Microsoft Teams."
+description: "Connect netclaw to Teams personal chats, channels, and approved Group Chats."
 ---
 
-netclaw connects personal chats and standard team channels through the Bot Framework
-HTTPS endpoint. Use it when your organization runs on Teams and exposes
-`netclawd` through public HTTPS.
+Connect netclaw to Teams through an Azure Bot for personal chats, standard channel threads, and approved Group Chats. It supports approval cards, proactive replies and reminders, bounded image handling, and Graph-backed discovery and group authorization.
 
-## Prerequisites
-
-- netclaw installed and initialized with [`netclaw init`](/cli/init/)
-- PowerShell 7 and a checkout of the netclaw release you run
-- An Azure subscription with permission to create an Azure Bot resource
-- Permission to upload custom Teams apps, or help from a Teams administrator
-- A public HTTPS URL with a valid certificate that reaches `/api/messages`
-- Public HTTPS privacy and terms pages
-- Canonical tenant, team, channel, and user IDs from an authenticated source
-
-## Choose an endpoint
-
-Use a temporary HTTPS tunnel only for a bounded test. Use a stable HTTPS host
-for production. Restore the production endpoint after each tunnel test.
-
-See [Exposure modes](/deployment/exposure-modes/) for the supported netclaw
-network modes.
-
-Configure a supported non-local exposure mode before registration. A reverse
-proxy needs a non-loopback daemon address and explicit `Daemon.TrustedProxies`.
-
-## Register the app and bot
-
-1. [Register a single-tenant application](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app)
-   in Microsoft Entra ID.
-2. Record the application ID and tenant ID.
-3. Create a client secret with the shortest practical expiry.
-4. Remove the default Microsoft Graph `User.Read` permission if it exists.
-5. Create and [configure an Azure Bot registration](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/authentication/add-authentication).
-6. Select **Single Tenant** as the Azure Bot app type.
-7. Use the existing Entra application ID and tenant ID for the bot identity.
-8. Enable the Microsoft Teams channel on the Azure Bot resource.
-9. Set the messaging endpoint to `https://<public-host>/api/messages`.
-
-Azure Bot accepts one messaging endpoint for personal chats and team channels.
-Use the application ID for the Azure Bot, package `AppId`, `ClientId`, and
-`BotId`.
-
-Copy the client secret value immediately. Microsoft does not show that value
-again. Do not copy the secret ID.
-
-:::caution
-Do not add Microsoft Graph permissions. netclaw does not use Graph discovery or
-download fallbacks for Teams.
-
-This package does not enable private or shared channels.
+:::note
+This guide covers the current `dev` implementation. Use a netclaw build that includes it; earlier releases may not.
 :::
 
-## Build the Teams app package
+Teams transports normal messages, and Microsoft Graph handles directory discovery and group-membership checks. netclaw enforces tenant, ACL, session, audience, and tool policies before every model dispatch.
 
-The [package source](https://github.com/netclaw-dev/netclaw/tree/dev/deploy/teams)
-contains the manifest template, icons, and build script.
+## Before you begin
 
-Run this command from the repository root in PowerShell 7.
+- A working netclaw installation and a public HTTPS endpoint for `netclawd`
+- A valid TLS certificate for that endpoint
+- Public HTTPS privacy-policy and terms-of-use URLs
+- A Microsoft Entra tenant and permission to register an application
+- An active Azure subscription, plus permission to create or use a resource group and an Azure Bot resource
+- Teams custom-app deployment capability, or a Teams administrator who has it
+- An Entra administrator who can grant Graph application consent when you use directory features
 
-```powershell
-pwsh ./deploy/teams/build-package.ps1 `
-  -AppId '<entra-application-id>' `
-  -DeveloperName '<operator-name>' `
-  -PrivacyUrl 'https://example.com/privacy' `
-  -TermsOfUseUrl 'https://example.com/terms' `
-  -Version '1.0.0' `
-  -OutputPath './artifacts/netclaw-teams.zip'
+An Azure subscription is required because Azure Bot is an Azure resource. Use a short-lived HTTPS tunnel only for testing; production needs a stable public endpoint. See [Exposure modes](/deployment/exposure-modes/) for netclaw network configuration.
+
+## How it fits together
+
+```text
+Microsoft Teams
+        |
+Azure Bot / Bot Framework endpoint
+        |
+POST /api/messages
+        |
+Microsoft Teams SDK 2.x
+        |
+netclaw Teams adapter
+        |
+sessions / approvals / tools / reminders
 ```
 
-The ZIP contains `manifest.json`, `color.png`, and `outline.png` at its root.
-The manifest requests only the `personal` and `team` bot scopes.
+Azure Bot and the Teams SDK carry message transport. Graph does not carry normal Teams messages. It resolves directory labels and checks configured Entra group membership.
 
-Do not commit the generated package. It contains your app ID and policy URLs.
-The developer name has a 32-character limit. Increase the semantic version for
-every package update.
+Standard Team channels and threads are supported. Private and shared channels, meetings, calling, tabs, and video are not. The package supports personal, team, and Group Chat scopes.
+
+## Create the Azure and Entra resources
+
+| Azure item | Requirement | Example |
+| --- | --- | --- |
+| Subscription | Active Azure subscription | `Production subscription` |
+| Resource group | Contains the bot | `rg-netclaw-teams` |
+| Azure Bot | Single-tenant bot using the netclaw Entra app | `netclaw-teams` |
+| Location | Azure Bot location | `Global` |
+| Pricing tier | A suitable Azure Bot tier | `F0` is a common starting tier |
+| Teams channel | Enabled on the Azure Bot | Microsoft Teams |
+| Messaging endpoint | Public netclaw ingress | `https://netclaw.example.com/api/messages` |
+
+### Register one Entra application
+
+1. [Register a single-tenant application](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app).
+2. Record its tenant ID and application (client) ID.
+3. Create a client secret with the shortest practical lifetime. Copy the **secret value**, not its identifier. Microsoft documents [client-secret creation and rotation](https://learn.microsoft.com/en-us/entra/identity-platform/how-to-add-credentials).
+4. Remove the default delegated `User.Read` permission if Entra added it. netclaw does not require it.
+
+Use the application/client ID as the Azure Bot Microsoft App ID and `Teams.ClientId`. Set `Teams.BotId`, the package `id` and `botId`, and `webApplicationInfo.id` to the same value. `BotId` lets netclaw recognize structured bot mentions; it is not a separate Graph credential.
+
+:::caution
+**The number one setup mistake is storing `ClientSecret` in `netclaw.json`.** Use netclaw's encrypted secret store. The secret overlay or `NETCLAW_Teams__ClientSecret` are also supported. The same credential serves Azure Bot and Graph; netclaw does not need or store a second Graph secret or Graph access tokens.
+:::
+
+### Create the Azure Bot
+
+1. Create or select `rg-netclaw-teams`.
+2. Create an Azure Bot and select the single-tenant application model.
+3. Use the existing Entra application/client ID and tenant ID.
+4. Enable the **Microsoft Teams** channel.
+5. Set the messaging endpoint to `https://<public-netclaw-host>/api/messages`, for example `https://netclaw.example.com/api/messages`.
+6. Confirm the endpoint is publicly reachable over valid TLS.
+
+Follow Microsoft's [Azure Bot resource guide](https://learn.microsoft.com/en-us/azure/bot-service/abs-quickstart?view=azure-bot-service-4.0) for the current portal workflow.
+
+## Grant the right permissions
+
+Teams/Bot transport, Graph application permissions, and Teams resource-specific consent (RSC) are separate security surfaces. Do not put RSC entries in Entra's Graph permission list.
+
+### Microsoft Graph application permissions
+
+Grant these **application** permissions and admin consent when using discovery or group authorization. A manual canonical-ID setup without group authorization works without them; see the [Microsoft Graph permission reference](https://learn.microsoft.com/en-us/graph/permissions-reference) when granting consent.
+
+| Permission | Admin consent | netclaw use |
+| --- | ---: | --- |
+| `Team.ReadBasic.All` | Yes | Discover Teams and display Team metadata |
+| `Channel.ReadBasic.All` | Yes | Discover channels and display names and descriptions |
+| `User.Read.All` | Yes | Discover users and their canonical Entra identities |
+| `GroupMember.Read.All` | Yes | Discover groups and check group membership for authorization |
+| `Chat.ReadBasic.All` | Yes, optional | Discover Group Chat titles and basic metadata |
+
+`Chat.ReadBasic.All` enables friendly Group Chat discovery. You do not need it when entering a canonical Group Chat ID manually. It does not grant chat-message access or prove that the app is installed in a chat.
+
+netclaw does not require delegated `User.Read`, `Directory.Read.All`, `Chat.Read.All`, `ChatMessage.Read.All`, `Files.Read.All`, or `Sites.Read.All` for this feature.
+
+### Teams resource-specific consent
+
+The generated package requests these **Application / RSC** permissions:
+
+| Permission | Scope | Purpose |
+| --- | --- | --- |
+| `ChannelMessage.Read.Group` | Installed Team | Lets Teams deliver the channel messages needed for an approved human to continue an established bot thread without another mention |
+| `ChatMessage.Read.Chat` | Installed Group Chat | Supports packaged-app message delivery in approved Group Chats |
+
+RSC is defined in the Teams manifest, not in Entra. Teams asks the appropriate resource owner for consent when the app is added or upgraded in a Team or chat. See Microsoft's [RSC consent guidance](https://learn.microsoft.com/en-us/microsoftteams/manage-consent-app-permissions).
+
+Before dispatch, netclaw checks the authenticated tenant, Team, channel or chat, principal, ACL, mention policy, root or thread, and audience. RSC does not bypass those checks.
+
+## Build and install the Teams app
+
+Clone or download the matching netclaw source checkout that contains [`deploy/teams`](https://github.com/netclaw-dev/netclaw/tree/dev/deploy/teams), then run the package script from that repository root. It uses built-in PowerShell archive support, so Windows PowerShell 5.1 and PowerShell 7 are both suitable.
+
+```powershell
+$BuildPackage = @{
+    AppId = '00000000-0000-0000-0000-000000000000'
+    DeveloperName = 'Example Operator'
+    PrivacyUrl = 'https://example.com/privacy'
+    TermsOfUseUrl = 'https://example.com/terms'
+    OutputPath = './artifacts/netclaw-teams.zip'
+    Version = '1.0.0'
+}
+
+./deploy/teams/build-package.ps1 @BuildPackage
+```
+
+The ZIP root contains `manifest.json`, `color.png`, and `outline.png`. The manifest requests `personal`, `team`, and `groupchat` bot scopes plus both RSC permissions above. Because it includes your application ID and policy URLs, do not commit it. Increase the semantic `Version` for every upgrade so Teams recognizes the update and requests any new manifest permissions.
+
+### Test or deploy
+
+For development, sideload the ZIP if tenant policy permits custom app uploads. For organization deployment, upload and approve the package through the Teams admin center, then make it available only to intended users and Teams. Policy can block user sideloading.
+
+Making the package available does not install it into a conversation. Add it personally for a personal-chat test, add it to each approved Team for channel use, and add it to each approved Group Chat for Group Chat use. Teams asks the appropriate resource owner for RSC consent at that installation or upgrade. Use Microsoft's [custom-app upload guide](https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/deploy-and-publish/apps-upload) for testing and its [admin-center policy guide](https://learn.microsoft.com/en-us/microsoftteams/teams-custom-app-policies-and-settings) for organization rollout.
 
 ## Configure netclaw
 
-Store the client secret with [`netclaw secrets`](/cli/secrets/):
+Start in the TUI:
+
+```text
+netclaw config
+  -> Channels
+  -> Microsoft Teams
+```
+
+Configure the tenant ID, application/client ID, Bot ID, and masked client secret. The TUI supports discovery, access management, attachment configuration, Group Chat discovery, and manual entry of canonical IDs.
+
+Names, UPNs, and mail addresses shown by discovery are presentation metadata. netclaw persists and authorizes canonical IDs only. Use the manual ID path when Graph discovery is unavailable.
+
+Store the secret separately:
 
 ```bash
 netclaw secrets set Teams.ClientSecret '<client-secret>'
 ```
 
-Merge this `Teams` object into `~/.netclaw/config/netclaw.json`. Keep unrelated
-settings unchanged.
+### Send the first message
+
+For a minimal setup, enter canonical IDs manually and skip Graph permissions. Grant Graph permissions only when you need discovery or Entra group authorization.
+
+1. Enable Teams and save the connection in the TUI.
+2. Add one allowed user, then configure either personal chats or one Team and one channel.
+3. Add the packaged app to that personal scope, Team, or Group Chat.
+4. Wait for the coordinated daemon reload after the saved configuration, then send a message from the allowed user.
+
+| To allow | Configure |
+| --- | --- |
+| Personal chat | `AllowDirectMessages=true` and a global `AllowedUserIds` or `AllowedGroupIds` grant |
+| Standard channel | The canonical Team ID in `AllowedTeamIds`, its canonical channel ID in `AllowedChannelIds`, and an allowed principal when you want sender restrictions |
+| Group Chat | `AllowGroupChats=true`, the canonical chat ID in `AllowedGroupChatIds`, and a global allowed principal |
+
+For a new channel root or any Group Chat message with `MentionOnly=true`, select the bot from Teams' `@` mention picker. Typing its display name is not a structured bot mention.
+
+### Users, groups, and channel access
+
+The canonical user identity is normally the authenticated Teams `aadObjectId` - the Entra object ID. netclaw falls back to the Bot Framework sender ID only when that identity is absent. Obtain users through authenticated directory discovery or the TUI.
+
+| Setting | What it controls |
+| --- | --- |
+| `AllowedUserIds` | Global allowed Entra user object IDs |
+| `AllowedGroupIds` | Global allowed Entra group object IDs |
+| `ChannelAccessOverrides` | Exact Team-and-channel principal grants that combine with global grants |
+| `ChannelAudienceOverrides` | Audience and tool-policy classification for a Team or channel |
+
+Global and matching channel-specific grants combine. Once a global or matching channel-specific principal rule exists, a sender must match one of them. A group match never bypasses tenant, Team, channel, mention, root, or audience policy. Graph failures deny group-derived authorization. An explicit allowed user does not need a group lookup.
+
+`ChannelAudienceOverrides` changes the [audience and tool policy](/security/security-model/). `ChannelAccessOverrides` adds channel-specific principal grants. They are not interchangeable.
+
+### Group Chats
+
+Group Chat ingress is disabled by default. Enable it here:
+
+```text
+netclaw config
+  -> Channels
+  -> Microsoft Teams
+  -> Group Chat ingress
+```
+
+Each Group Chat also needs an exact tenant match, an ID in `AllowedGroupChatIds`, and an authorized global user or verified global group member. With `MentionOnly=true`, every Group Chat message needs a structured bot mention.
+
+Ingress, chat authorization, and saved chat IDs are independent. Enabling ingress does not authorize a chat, adding a chat does not enable ingress, and disabling ingress preserves saved IDs.
+
+For title discovery, open:
+
+```text
+Add a channel or Group Chat
+  -> Group Chat
+  -> Group Chat name
+```
+
+Search matches partial or full titles without case sensitivity. Because Graph has no tenant-wide chat-title search, netclaw performs bounded metadata discovery and deduplicates canonical chat IDs. Searches can take time in large tenants; you can stop and resume them. An incomplete search does not prove a chat is missing - enter its canonical ID through the advanced path.
+
+### Mention and thread behavior
+
+Keep `MentionOnly=true`. A new Team channel root needs a genuine structured bot mention. After an approved human establishes that root, RSC-backed delivery can allow that same human to continue the thread without mentioning the bot again. Unknown roots, other senders, and unapproved users still do not dispatch a model turn.
+
+Personal chats do not use channel-root mention semantics. Group Chats do: with `MentionOnly=true`, every Group Chat message requires a structured mention.
+
+### Attachments and images
+
+`AllowAttachments` defaults to `false`. When enabled, netclaw accepts image candidates only after bounded trust checks, download, and verification. PNG, JPEG, GIF, and WebP reach image-capable models only when active policy permits it.
+
+Unsafe or ambiguous attachments fail closed. Verified but unsupported image formats can remain available only as paths. Ordinary channel and Group Chat files are more restricted than image ingress. Do not add broad Graph file permissions as a workaround.
+
+## Manual configuration reference
+
+Use the TUI first. This reference is for scripted or headless installs; keep the secret out of normal JSON.
 
 ```json
 {
@@ -99,102 +239,46 @@ settings unchanged.
     "BotId": "<entra-application-id>",
     "AuthenticationMode": "ClientSecret",
     "AllowDirectMessages": false,
+    "AllowGroupChats": false,
+    "AllowAttachments": false,
     "MentionOnly": true,
-    "AllowedTeamIds": ["<canonical-team-id>"],
-    "AllowedChannelIds": ["<canonical-channel-id>"],
-    "AllowedUserIds": ["<canonical-user-id>"],
-    "ChannelAudienceOverrides": [
-      {
-        "TeamId": "<canonical-team-id>",
-        "ChannelId": "<canonical-channel-id>",
-        "Audience": "team"
-      }
-    ]
+    "AllowedTeamIds": [],
+    "AllowedChannelIds": [],
+    "AllowedGroupChatIds": [],
+    "AllowedUserIds": [],
+    "AllowedGroupIds": [],
+    "ChannelAudiences": {},
+    "ChannelAudienceOverrides": [],
+    "ChannelAccessOverrides": []
   }
 }
 ```
 
-Do not add `ClientSecret` to `netclaw.json`. netclaw reads it from the encrypted
-secret store or `NETCLAW_Teams__ClientSecret`.
+| Field | Default | Description |
+| --- | --- | --- |
+| `Enabled` | `false` | Starts the Teams channel |
+| `TenantId` | - | Accepted Entra tenant ID |
+| `ClientId` | - | Entra application/client ID |
+| `BotId` | - | Bare Microsoft App ID used for mentions. Do not include `28:` |
+| `AuthenticationMode` | `ClientSecret` | Supported credential mode |
+| `AllowDirectMessages` | `false` | Allows personal chats from authorized global principals |
+| `AllowGroupChats` | `false` | Enables Group Chat ingress after its other gates pass |
+| `AllowAttachments` | `false` | Enables bounded attachment handling |
+| `MentionOnly` | `true` | Requires structured mentions under the channel and Group Chat rules above |
+| `AllowedTeamIds` | `[]` | Allowed canonical Teams IDs |
+| `AllowedChannelIds` | `[]` | Allowed canonical channel IDs |
+| `AllowedGroupChatIds` | `[]` | Allowed canonical Group Chat IDs |
+| `AllowedUserIds` | `[]` | Global allowed principal IDs |
+| `AllowedGroupIds` | `[]` | Global allowed Entra group object IDs |
+| `ChannelAudiences` | `{}` | Legacy dictionary of canonical Team or Team/channel keys to an audience |
+| `ChannelAudienceOverrides` | `[]` | Team or channel audience overrides |
+| `ChannelAccessOverrides` | `[]` | Exact channel principal grants that combine with global grants |
 
-### Configuration fields
+`ChannelAudienceOverrides` is the delimiter-safe audience form. Use it when a canonical ID contains configuration path delimiters; an exact Team-and-channel entry takes precedence over a Team-wide entry. Empty Team or channel allow-lists reject channel traffic. An allowed channel uses legacy channel-only authorization only when no global or matching channel-specific principal rule exists. Personal and Group Chats still require a global principal grant.
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `Enabled` | bool | `false` | Start the Teams channel |
-| `TenantId` | string | - | Accepted Entra tenant ID |
-| `ClientId` | string | - | Entra application ID |
-| `BotId` | string | - | Bare Microsoft App ID for mentions. Do not include `28:`. |
-| `AuthenticationMode` | string | `ClientSecret` | Bot credential mode |
-| `AllowDirectMessages` | bool | `false` | Accept personal chats |
-| `MentionOnly` | bool | `true` | Require a qualified bot mention in team channels |
-| `AllowedTeamIds` | string[] | `[]` | Allowed team IDs |
-| `AllowedChannelIds` | string[] | `[]` | Allowed channel IDs |
-| `AllowedUserIds` | string[] | `[]` | Optional sender filter |
-| `ChannelAudienceOverrides` | object[] | `[]` | Team or channel [audience](/security/security-model/) rules |
+## Verify the integration
 
-## Access control
-
-Teams access is default-deny.
-
-- An empty team or channel allow-list rejects all channel messages.
-- An empty user allow-list accepts all users in an allowed channel.
-- Personal chats require `AllowDirectMessages: true` and an exact
-  `AllowedUserIds` match.
-- `MentionOnly` requires a qualified bot mention in team channels.
-- An unmapped channel uses the `public` audience.
-
-:::caution
-Populate `AllowedUserIds` for production. Otherwise, every member of an allowed
-channel can address the bot.
-:::
-
-Select the bot from the Teams `@` mention menu. Plain text with the bot name is
-not a qualified mention.
-
-`AllowedUserIds` uses the Bot Framework sender ID for this bot. It is not the
-user's Entra object ID.
-
-`AllowedTeamIds` uses the Teams activity team ID. It can differ from the
-Microsoft 365 group object ID.
-
-Obtain IDs through the approved authenticated provisioning process. netclaw
-does not learn allow-list values from rejected traffic.
-
-Use `ChannelAudienceOverrides` when an ID contains configuration separators.
-Exact team-and-channel entries override team-wide entries.
-
-## Sideload the app
-
-1. Open **Apps** in Microsoft Teams.
-2. Open **Manage your apps**.
-3. Select **Upload an app**.
-4. Select **Upload a custom app**.
-5. Upload `netclaw-teams.zip`.
-6. Add the app only to approved accounts and teams.
-
-If tenant policy blocks custom uploads, ask a Teams administrator to upload or
-approve the package.
-
-Microsoft documents
-[custom app upload](https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/deploy-and-publish/apps-upload)
-and [organization publication](https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/deploy-and-publish/apps-publish-overview).
-
-## Publish for your organization
-
-1. Build the package with production IDs and policy URLs.
-2. Confirm that the manifest contains only `personal` and `team` bot scopes.
-3. Upload the package through the Teams admin center.
-4. Approve access only for intended users and teams.
-5. Keep the bot messaging endpoint on the stable production URL.
-
-Review Microsoft's
-[custom app policies](https://learn.microsoft.com/en-us/microsoftteams/teams-custom-app-policies-and-settings)
-before organization publication.
-
-## Verify it works
-
-Run the local checks first:
+Run the local checks after configuration, package changes, or secret rotation:
 
 ```bash
 netclaw doctor
@@ -202,62 +286,49 @@ netclaw status
 curl http://127.0.0.1:5199/api/health/ready
 ```
 
-Expect Teams to report `degraded` with the configured-but-unvalidated message.
-The readiness endpoint proves only daemon liveness.
+Run the readiness command on the daemon host or inside its container or network namespace. For a remote deployment, use that deployment's local health-check path instead. The readiness endpoint proves only that the daemon is live. Teams remains configured but unvalidated in this release.
 
-The sample configuration disables personal chats. Send one qualified mention
-in an allowed channel.
+Then test the enabled surfaces:
 
-Success requires these results:
+1. Send a personal message from an allowed user if personal chats are enabled.
+2. Mention the bot in a new root in an approved channel. Confirm the reply stays in that root.
+3. Reply in that thread without a mention as the same approved user. Confirm that the bot continues the thread, then confirm that it ignores an unmentioned new root.
+4. In an enabled, approved Group Chat, send a structured bot mention from an allowed principal.
+5. Trigger a safe, non-destructive action that needs approval and confirm the Teams Adaptive Card renders.
 
-- `netclaw doctor` passes.
-- The readiness endpoint returns HTTP 200.
-- The bot reply appears under the same channel root.
-- No unrelated channel root receives the reply.
-- The Teams `recv`, `routed`, and `replied` counters increase.
-
-Do not retain tenant IDs, message content, file content, credentials, or tunnel
-URLs as test evidence.
-
-## Rotate the client secret
-
-1. Create a new Entra client secret.
-2. Store it with `netclaw secrets set Teams.ClientSecret '<new-secret>'`.
-3. Restart `netclawd`.
-4. Run the health checks.
-5. Revoke the old secret after the new secret works.
-
-Keep the old secret active until the checks pass. Never print either secret
-during diagnosis.
+Check that the Teams `recv`, `routed`, and `replied` counters advance. Do not retain message bodies, identifiers, endpoints, tokens, or secrets as test evidence.
 
 ## Troubleshooting
 
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| Teams stays disconnected | The credential or endpoint is invalid | Check `netclaw status`, the secret, and the Azure Bot endpoint |
-| A channel message gets no reply | The app, endpoint, tenant, ACL, or mention is wrong | Check the app installation, endpoint, tenant ID, ACL IDs, and structured mention |
-| A restricted tool is unavailable | The channel resolved to `public` | Add an exact `ChannelAudienceOverrides` entry |
-| An uploaded file is rejected | Teams files are not approved for model dispatch | Remove the upload and send text instead |
-| A secret appears in normal config | The secret is in the wrong store | Remove it and rotate it, then use `netclaw secrets set` |
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| Azure Bot cannot reach netclaw | Wrong endpoint, reverse proxy, or TLS | Set the exact `/api/messages` HTTPS endpoint and verify certificate and proxy configuration |
+| Connector is disconnected | Invalid tenant, client ID, Bot ID, or secret | Compare the Entra app and Azure Bot IDs; set the secret again and run `netclaw doctor` |
+| No reply in a channel | App not installed, ACL mismatch, or missing structured mention | Install the app, check canonical IDs, and mention the bot in a new root |
+| Thread continuation does not work | Package was not upgraded with RSC | Increment the package version, upgrade it in that Team, and complete the consent prompt |
+| Group Chat is silent | Ingress is off, chat ID is absent, or principal is unauthorized | Enable ingress, save the canonical chat ID, and add a global user or group grant |
+| Friendly Group Chat search fails | `Chat.ReadBasic.All` is absent | Grant optional admin consent or enter the canonical chat ID manually |
+| Group authorization fails | Graph consent or membership lookup failed | Grant `GroupMember.Read.All`; treat lookup failures as a deny and inspect non-secret diagnostics |
+| A channel has only public tools | No audience override matched | Add an exact `ChannelAudienceOverrides` entry |
+| Image is rejected | Attachments are disabled or validation failed | Enable `AllowAttachments`; use a supported image and do not bypass the trust gate |
+| Package update is ignored | Version did not change | Increase the semantic package version before uploading or reinstalling |
+| Secret appears in JSON | Secret is in the wrong store | Remove and rotate it, then use `netclaw secrets set Teams.ClientSecret` |
 
-## Roll back
+## Rotate or disable
 
-1. Set `Teams.Enabled` to `false`.
-2. Restart `netclawd`.
-3. Confirm the channel is disabled with `netclaw status`.
-4. Block or withdraw the app in the Teams admin center.
-5. Revoke the client secret when the rollback is permanent.
+Create a new Entra secret and store it with `netclaw secrets set Teams.ClientSecret '<new-secret>'`. Restart `netclawd`, run the checks above, then revoke the old secret. Keep the old secret active until the new one works.
 
-Rollback stops new Teams messages. Existing session, approval, reminder, and
-delivery records remain.
+Set `Teams.Enabled` to `false`, restart `netclawd`, and confirm the change with `netclaw status`. Then block or withdraw the Teams app. Revoke the secret only when the rollback is permanent.
 
 ## Related pages
 
-- [Security model](/security/security-model/) - audience and tool policy
+- [Security model](/security/security-model/) - audiences and tool policy
+- [`netclaw config`](/cli/config/) - the configuration dashboard
 - [`netclaw secrets`](/cli/secrets/) - encrypted secret storage
 - [Channel troubleshooting](/channels/troubleshooting/) - shared channel checks
 
 ## Resources
 
-- [Teams app manifest schema](https://learn.microsoft.com/en-us/microsoftteams/platform/resources/schema/manifest-schema)
-- [Teams app icon requirements](https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/design/design-teams-app-icon-store-appbar)
+- [Microsoft Teams app manifest schema](https://learn.microsoft.com/en-us/microsoftteams/platform/resources/schema/manifest-schema)
+- [Grant and manage Teams app permissions](https://learn.microsoft.com/en-us/microsoftteams/manage-consent-app-permissions)
+- [Upload a custom Teams app](https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/deploy-and-publish/apps-upload)
